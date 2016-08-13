@@ -1145,6 +1145,109 @@ static bool load_content_from_compressed_archive(
 }
 #endif
 
+static int task_content_iterate_load(retro_task_t *task)
+{
+   retro_ctx_load_content_info_t *load_info = task->state;
+
+   /* Load content */
+   core_load_game(load_info);
+
+   return 0;
+}
+
+static void task_content_load_handler(retro_task_t *task)
+{
+   /* Handle task cancellation */
+   if (task->cancelled)
+      goto task_finished;
+
+   /* Iterate load */
+   if (!task_content_iterate_load(task))
+      goto task_finished;
+
+   /* Return already as loading is incomplete */
+   return;
+
+task_finished:
+   /* Flag loading as complete */
+   task->finished = true;
+
+   /* Free previously allocated data */
+   /* TODO: free all content */
+   free(task->state);
+}
+
+static bool task_content_finder(retro_task_t *task, void *data)
+{
+   /* Return whether task handler is our content load handler or not */
+   return (!task || (task->handler != task_content_load_handler));
+}
+
+bool task_push_content_load_default_new(retro_ctx_load_content_info_t *data)
+{
+   task_finder_data_t find_data;
+   retro_ctx_load_content_info_t *info = NULL;
+   retro_task_t *t = NULL;
+   char *str;
+   int size;
+   int i;
+
+   /* Concurrent content loading is not allowed */
+   find_data.func = task_content_finder;
+   if (task_queue_ctl(TASK_QUEUE_CTL_FIND, &find_data))
+   {
+      RARCH_LOG("[content] Content loading already in progress!\n");
+      goto error;
+   }
+
+   /* Allocation load info */
+   info = (retro_ctx_load_content_info_t *)calloc(1, sizeof(*info));
+   if (!info)
+      goto error;
+
+   /* Allocate task */
+   t = (retro_task_t *)calloc(1, sizeof(*t));
+   if (!t)
+      goto error;
+
+   /* Copy data info */
+   info->info = (struct retro_game_info *)calloc(1, sizeof(*info->info));
+   info->info->path = data->info->path ? strdup(data->info->path) : NULL;
+   info->info->meta = data->info->meta ? strdup(data->info->meta) : NULL;
+   info->info->data = data->info->data;
+   info->info->size = data->info->size;
+
+   /* Copy data content */
+   info->content = (struct string_list *)calloc(1, sizeof(*info->content));
+   info->content->size = data->content->size;
+   info->content->cap = data->content->cap;
+
+   /* Copy data content elements */
+   size = sizeof(*info->content->elems);
+   info->content->elems = calloc(data->content->size, size);
+   for (i = 0; i < data->content->size; i++) {
+      str = data->content->elems[i].data;
+      info->content->elems[i].data = str ? strdup(str) : NULL;
+      info->content->elems[i].attr = data->content->elems[i].attr;
+   }
+
+   /* TODO: copy special */
+
+   /* Fill task information */
+   t->handler = task_content_load_handler;
+   t->state = info;
+   t->progress = -1;
+
+   /* Queue task and return success */
+   task_queue_ctl(TASK_QUEUE_CTL_PUSH, t);
+   return true;
+
+error:
+   /* Free allocated data */
+   free(t);
+   return false;
+}
+
 /**
  * load_content:
  * @special          : subsystem of content to be loaded. Can be NULL.
@@ -1212,7 +1315,7 @@ static bool load_content(
    load_info.special = special;
    load_info.info    = info;
 
-   if (!core_load_game(&load_info))
+   if (!task_push_content_load_default_new(&load_info))
    {
       RARCH_ERR("%s.\n", msg_hash_to_str(MSG_FAILED_TO_LOAD_CONTENT));
       return false;
